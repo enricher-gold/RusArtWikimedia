@@ -1,15 +1,14 @@
-name: Build APK from ZIP
+name: Build debug APK (from ZIP)
 
 on:
-  workflow_dispatch:
   push:
-    paths:
-      - "RusArtWikimedia.zip"
-      - ".github/workflows/android.yml"
+    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,30 +18,75 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
 
+      # ⬇️ имя ZIP должно совпадать с файлом в репозитории
       - name: Unzip project
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          ZIP="RusArtWikimedia_new.zip"
+          if [[ ! -f "$ZIP" ]]; then
+            echo "❌ ZIP not found: $ZIP"
+            exit 9
+          fi
           rm -rf project
           mkdir -p project
-          unzip -o RusArtWikimedia.zip -d project
-          echo "Unzipped"
+          unzip -q "$ZIP" -d project
 
-      - name: Generate Gradle wrapper
-        working-directory: project
+          # ищем каталог, где лежит settings.gradle(.kts)
+          ROOT_DIR="$(find project -maxdepth 3 -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print -quit)"
+          if [[ -z "$ROOT_DIR" ]]; then
+            # не нашли — предполагаем, что корень проекта = project
+            ROOT="project"
+          else
+            ROOT="$(dirname "$ROOT_DIR")"
+          fi
+          echo "PROJECT_DIR=$ROOT" >> "$GITHUB_ENV"
+          printf "Detected project dir: %s\n" "$ROOT"
+
+      - name: Provision Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Generate Gradle wrapper (if missing)
+        shell: bash
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y gradle
-          gradle wrapper --gradle-version 8.7
-          chmod +x ./gradlew
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          if [[ ! -f gradlew ]]; then
+            echo "gradlew not found, generating wrapper…"
+            gradle wrapper --gradle-version 8.7
+          fi
+          chmod +x gradlew
 
       - name: Build debug APK
-        working-directory: project
+        shell: bash
         run: |
-          ./gradlew --no-daemon assembleDebug
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          ./gradlew --no-daemon \
+            -Pandroid.useAndroidX=true \
+            -Pandroid.enableJetifier=true \
+            assembleDebug
 
-      - name: Upload APK
+      - name: Locate APK
+        id: locate
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          APK_PATH="$(find . -type f -name "*-debug.apk" | head -n1)"
+          if [[ -z "$APK_PATH" ]]; then
+            echo "No debug APK found"
+            exit 1
+          fi
+          echo "apk=$APK_PATH" >> "$GITHUB_OUTPUT"
+          echo "Found APK at: $APK_PATH"
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RusArtWidget-debug
-          path: project/app/build/outputs/apk/debug/*.apk
+          name: RusArtWikimedia-debug-apk
+          path: ${{ steps.locate.outputs.apk }}
